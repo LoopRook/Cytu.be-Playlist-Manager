@@ -13,6 +13,8 @@
 // @connect      google.com
 // @connect      *
 // @run-at       document-idle
+// @downloadURL  https://raw.githubusercontent.com/LoopRook/Cytu.be-Playlist-Manager/refs/heads/main/Cytu.be%20Playlist%20Manager.js
+// @updateURL    https://raw.githubusercontent.com/LoopRook/Cytu.be-Playlist-Manager/refs/heads/main/Cytu.be%20Playlist%20Manager.js
 // ==/UserScript==
 
 (function(){
