@@ -2,7 +2,7 @@
 // @name         Cytu.be Playlist Manager
 // @namespace    cytube-saved-playlists
 // @version      3.6.0
-// @description  Drive-backed DB per channel. Multiple playlists per DB. Add N (Next/End), Replace/Append, dedupe, edit saved, Export/Import. Glass UI + collapsible + Auto-Push + Auto-Pull (hybrid: event + periodic). Fixes: UI boot, DB header expand, status chips sync, Add URL clears, interval selector.
+// @description  Manage and sync Cytu.be playlists with a sleek glass-style UI and optional Google Drive database. Create multiple saved playlists per channel, edit and reorder tracks, append or replace current lists, auto-dedupe entries, and export/import backups. Includes collapsible panels and offline fallback for smooth management.
 // @match        https://cytu.be/r/*
 // @match        https://*.cytu.be/r/*
 // @match        http://cytu.be/r/*
