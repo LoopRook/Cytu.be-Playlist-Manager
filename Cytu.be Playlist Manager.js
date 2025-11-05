@@ -157,7 +157,7 @@
 
   // CSS
   function injectGlassCSS(){ if($('#ct-savedpl-style')) return; const css=`
-#ct-savedpl-panel{position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:9999;margin:0;max-width:min(1100px,96vw);backdrop-filter:blur(16px) saturate(160%);-webkit-backdrop-filter:blur(16px) saturate(160%);background:rgba(20,20,22,.55);color:#fff;border-radius:16px;border:1px solid rgba(255,255,255,.18);box-shadow:0 20px 60px rgba(0,0,0,.45);font:12px/1.2 system-ui}
+#ct-savedpl-panel{position:static;z-index:100;margin:10px auto 0;max-width:100%;backdrop-filter:blur(16px) saturate(160%);-webkit-backdrop-filter:blur(16px) saturate(160%);background:rgba(20,20,22,.55);color:#fff;border-radius:16px;border:1px solid rgba(255,255,255,.18);box-shadow:0 2px 10px rgba(0,0,0,.45);font:12px/1.2 system-ui}
 #ct-savedpl-header{display:flex;align-items:center;gap:10px;padding:10px 12px;cursor:pointer}
 #ct-savedpl-title{font-weight:700;letter-spacing:.2px}
 .ct-chip{padding:4px 8px;border-radius:12px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.14)}
@@ -317,7 +317,13 @@
 
       attachDatabaseUI(body);
 
-      document.body.prepend(panel);
+      const playlistContainer = $('#playlist');
+if (playlistContainer) {
+    playlistContainer.prepend(panel);
+} else {
+    // Fallback to body.prepend if the playlist container isn't found
+    document.body.prepend(panel);
+}
       refreshList(getIndex(),'');
 
       // Collapsible main
