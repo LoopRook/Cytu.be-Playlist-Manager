@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         CyTube Saved Playlists + Drive DB (Glass Embedded, no popups)
+// @name         CyTu.be Playlist Manager
 // @namespace    cytube-saved-playlists
-// @version      3.7.9
-// @description  Drive-backed playlists per channel. Embedded above #playlistmanager (no floating UI, no prompts). Save/Load, Replace/Append (Next/End), Add-N, Random, Dedupe, Import/Export, Text Editor. Apps Script DB with create/connect/pull/push & conflict-merge. Push auto-falls back to POST &op=put if PUT isn't supported. Reliable auto-reconnect.
+// @version      3.7.8-mod-toast-reduction
+// @description  Drive-backed playlists per channel. Save/Load, Replace/Append (Next/End), Add-N, Random, Dedupe, Import/Export, Text Editor
 // @match        https://cytu.be/*
 // @match        https://*.cytu.be/*
 // @run-at       document-end
