@@ -1,355 +1,906 @@
 // ==UserScript==
-// @name         Cytu.be Playlist Manager
+// @name         Cy.Tube Playlist Manager
 // @namespace    cytube-saved-playlists
-// @version      3.6.0
-// @description  Google Drive–based playlist manager for Cytu.be. Saves multiple playlists per channel and lets you append, replace, or add random videos with auto-dedupe, import/export, and a sleek glass-style UI.
-// @match        https://cytu.be/r/*
-// @match        https://*.cytu.be/r/*
-// @match        http://cytu.be/r/*
-// @match        http://*.cytu.be/r/*
+// @version      3.7.8-mod-toast-reduction
+// @description  Drive-backed playlists per channel. Save/Load, Replace/Append (Next/End), Add-N, Random, Dedupe, Import/Export, Text Editor. 
+// @match        https://cytu.be/*
+// @match        https://*.cytu.be/*
+// @run-at       document-end
 // @grant        GM_xmlhttpRequest
 // @connect      script.google.com
 // @connect      googleusercontent.com
 // @connect      google.com
 // @connect      *
-// @run-at       document-idle
-// @downloadURL  https://raw.githubusercontent.com/LoopRook/Cytu.be-Playlist-Manager/refs/heads/main/Cytu.be%20Playlist%20Manager.js
-// @updateURL    https://raw.githubusercontent.com/LoopRook/Cytu.be-Playlist-Manager/refs/heads/main/Cytu.be%20Playlist%20Manager.js
 // ==/UserScript==
-
 (function(){
   'use strict';
-  const $=(s,r=document)=>r.querySelector(s);
-  const $$=(s,r=document)=>Array.from(r.querySelectorAll(s));
-  const sleep=(ms)=>new Promise(r=>setTimeout(r,ms));
-  const channelName=(window.CHANNEL&&CHANNEL.name)||location.pathname.split('/').filter(Boolean).pop()||'default';
 
-  // ===== CONFIG =====
-  const DEFAULT_PULL_MS = 10000; // background pull interval; change here
-  const MIN_PULL_MS     = 3000;  // hard floor
-  // ==================
+  /* ---------------------------- Small utils ---------------------------- */
+  function $(s,r){ return (r||document).querySelector(s); }
+  function $$(s,r){ return Array.prototype.slice.call((r||document).querySelectorAll(s)); }
+  function sleep(ms){ return new Promise(function(res){ setTimeout(res, ms); }); }
+  var channelName=(window.CHANNEL&&window.CHANNEL.name)||location.pathname.split('/').filter(Boolean).pop()||'default';
 
-  // keys
-  const KEY=(n)=>`ct_savedpl:${channelName}:${n}`;
-  const LISTKEY=`ct_savedpl_index:${channelName}`;
-  const UIKEY_MAIN=`ct_ui_collapsed_main:${channelName}`;
-  const UIKEY_DB=`ct_ui_collapsed_db:${channelName}`;
-  const AUTOPUSH=`ct_autopush:${channelName}`;
-  const AUTOPULL=`ct_autopull:${channelName}`;
-  const AUTOPULL_MS_KEY=`ct_autopull_ms:${channelName}`;
-  const REV_BROADCAST_KEY=`ct_db_rev:${channelName}`;
+  function safeDataset(el,k){ try{ return (el&&el.dataset)?el.dataset[k]:undefined; }catch(e){ return undefined; } }
+  function getAttr(el,n){ try{ return (el&&typeof el.getAttribute==='function')?(el.getAttribute(n)||''):''; }catch(e){ return ''; } }
+  function hasFn(obj, fn){ try{ return obj && typeof obj[fn]==='function'; }catch(e){ return false; } }
 
-  // toast
-  function toast(msg){
-    try{
-      const t=document.createElement('div');
-      t.textContent=String(msg);
-      t.style.cssText='position:fixed;right:12px;bottom:12px;z-index:999999;background:rgba(20,20,20,.92);color:#fff;padding:8px 10px;border-radius:12px;font:12px/1.2 system-ui;max-width:62ch;box-shadow:0 10px 30px rgba(0,0,0,.35);white-space:pre-wrap;backdrop-filter:blur(12px) saturate(140%);border:1px solid rgba(255,255,255,.12)';
-      document.body.appendChild(t); setTimeout(()=>t.remove(),4200);
-    }catch{}
-  }
+  function toast(msg){ try{ var t=document.createElement('div'); t.textContent=String(msg||''); t.style.cssText='position:fixed;right:12px;bottom:12px;z-index:100000;padding:8px 10px;border-radius:10px;color:#e9ecf1;background:rgba(10,14,22,.8);backdrop-filter:blur(12px) saturate(140%);border:1px solid rgba(255,255,255,.12);'; document.body.appendChild(t); setTimeout(function(){ if(t&&t.parentNode) t.parentNode.removeChild(t); }, 5200); }catch(e){ console.error('[toast]', e, msg); }}
 
-  // GM fetch
-  function gmFetch(url,{method='GET',headers={},data=null,responseType='text'}={}){
-    return new Promise((resolve,reject)=>{
-      GM_xmlhttpRequest({url,method,headers,data,responseType,onload:r=>resolve(r),onerror:e=>reject(e),ontimeout:()=>reject(new Error('GM timeout'))});
-    });
-  }
-  async function gmFetchJSON(url,opts={}){
-    const r=await gmFetch(url,{...opts,responseType:'text'});
-    const text=r.responseText||'';
-    try{ return { json: JSON.parse(text), status:r.status, text }; }
-    catch{ return { json: null, status:r.status, text }; }
-  }
+  /* ----------------------- Keys & storage ---------------------- */
+  function KEY(n){ return 'ct_savedpl:'+channelName+':'+n; }
+  var LISTKEY='ct_savedpl_index:'+channelName;
+  var UIKEY_MAIN='ct_ui_collapsed_main:'+channelName;
+  var UIKEY_DB='ct_ui_collapsed_db:'+channelName;
+  var REV_BROADCAST_KEY='ct_db_rev:'+channelName;
 
-  // local store
-  const getIndexLocal=()=>{try{return JSON.parse(localStorage.getItem(LISTKEY)||'[]')}catch{return[]}};
-  const setIndexLocal=(arr)=>{const uniq=[...new Set(arr.filter(Boolean))].sort((a,b)=>a.localeCompare(b)); localStorage.setItem(LISTKEY,JSON.stringify(uniq)); return uniq;};
-  const readSavedLocal=(name)=>{try{const raw=localStorage.getItem(KEY(name)); return raw?JSON.parse(raw):{savedAt:0,items:[]}}catch{return{savedAt:0,items:[]}}};
-  const writeSavedLocal=(name,payload)=>localStorage.setItem(KEY(name),JSON.stringify(payload));
+  var LAST_USED_KEY='ct_db_last_used'; // { baseUrl, dbId, token }
+  var REGKEY='ct_db_registry';         // { [baseUrl]: { dbId, token } }
 
-  // url helpers
-  function parseYouTubeId(u){try{const url=new URL(u); if(url.hostname==='youtu.be')return url.pathname.slice(1); if(url.hostname.endsWith('youtube.com')){ if(url.pathname==='/watch')return url.searchParams.get('v')||''; if(url.pathname.startsWith('/shorts/'))return url.pathname.split('/')[2]||''; const m=url.pathname.match(/^\/embed\/([^\/?#]+)/); if(m) return m[1]; }}catch{} const m=String(u).match(/^[A-Za-z0-9_-]{8,}$/); return m?m[0]:'';}
-  const parseVimeoId=(u)=>{try{const m=String(u).match(/vimeo\.com\/(\d+)/i); return m?m[1]:''}catch{return''}};
-  const parseDailymotionId=(u)=>{try{const m=String(u).match(/dailymotion\.com\/video\/([a-z0-9]+)/i); return m?m[1]:''}catch{return''}};
-  const normalizeOtherUrl=(u)=>{try{const url=new URL(u); url.search=''; url.hash=''; return url.origin+url.pathname;}catch{return String(u).trim();}};
-  const urlToKey=(u)=>{const yt=parseYouTubeId(u); if(yt)return`yt:${yt}`; const vi=parseVimeoId(u); if(vi)return`vi:${vi}`; const dm=parseDailymotionId(u); if(dm)return`dm:${dm}`; return`url:${normalizeOtherUrl(u)}`;};
+  function getIndex(){ try{ return JSON.parse(localStorage.getItem(LISTKEY)||'[]'); }catch(e){ return []; } }
+  function setIndex(arr){ var uniq=Array.from(new Set(arr.filter(Boolean))).sort(function(a,b){ return a.localeCompare(b); }); localStorage.setItem(LISTKEY, JSON.stringify(uniq)); return uniq; }
 
-  const scrapeCurrentQueueKeys=()=>{const keys=[]; for(const el of $$('#queue .queue_entry, .queue_item')){ const svc=(el.dataset?.service||el.getAttribute('data-service')||'').toLowerCase(); const id=el.dataset?.id||el.getAttribute('data-id')||''; if(svc&&id){ if(svc==='yt')keys.push(`yt:${id}`); else if(svc==='vi'||svc==='vimeo')keys.push(`vi:${id}`); else if(svc==='dm')keys.push(`dm:${id}`); else keys.push(`url:${svc}:${id}`); continue;} const a=el.querySelector('a[href]'); if(a&&a.href) keys.push(urlToKey(a.href)); } if(!keys.length){ for(const a of $$('#queue a, #playlist a, .queue a, .qe_title a')){ if(a.href) keys.push(urlToKey(a.href)); } } return keys; };
-  const getCurrentKeySet=()=>new Set(scrapeCurrentQueueKeys());
+  function readSaved(name){ try{ return JSON.parse(localStorage.getItem(KEY(name))||'{}'); }catch(e){ return {}; } }
+  function writeSaved(name,payload){ localStorage.setItem(KEY(name), JSON.stringify(payload)); }
 
-  async function clearPlaylistRobust(){
-    try{ if(window.socket&&typeof window.socket.emit==='function'){ window.socket.emit('playlistClear'); for(let i=0;i<15;i++){ if(($$('#queue .queue_entry').length||0)===0) return true; await sleep(100);} } }catch{}
-    const clearBtn=$('#btn-clearplaylist')||$$('button, a').find(b=>/clear/i.test(b.textContent||'')||/clear/i.test(b.getAttribute?.('title')||''));
-    if(clearBtn){ clearBtn.click(); await sleep(80); const confirmBtn=$$('button, a').find(b=>/confirm|yes|ok/i.test(b.textContent||'')&&b.offsetParent); if(confirmBtn)confirmBtn.click(); for(let i=0;i<80;i++){ if(($$('#queue .queue_entry').length||0)===0) return true; await sleep(100);} }
-    return false;
-  }
-
-  // remote DB
-  const DBSTATE={connected:false,baseUrl:'',dbId:'',token:'',cache:null};
-  const saveConnPerChannel=()=>localStorage.setItem(`ct_db_conn:${channelName}`, JSON.stringify({baseUrl:DBSTATE.baseUrl,dbId:DBSTATE.dbId,token:DBSTATE.token}));
-  const loadConnPerChannel=()=>{try{const raw=localStorage.getItem(`ct_db_conn:${channelName}`); if(!raw) return false; const {baseUrl,dbId,token}=JSON.parse(raw); if(baseUrl&&dbId){ DBSTATE.baseUrl=baseUrl; DBSTATE.dbId=dbId; DBSTATE.token=token||''; DBSTATE.connected=true; return true; }}catch{} return false; };
-
-  async function driveInit(baseUrl){
-    const initPost=baseUrl.replace(/\?.*$/,'')+'?init=1';
-    let r=await gmFetchJSON(initPost,{method:'POST',headers:{'Content-Type':'application/json'},data:JSON.stringify({ping:1})});
-    if(!r.json||!r.json.dbId){ const initGet=baseUrl.replace(/\?.*$/,'')+'?init=1'; r=await gmFetchJSON(initGet,{method:'GET'}); if(!r.json||!r.json.dbId){ toast(`Create failed. Status ${r.status}`); throw new Error('init failed'); } }
-    return r.json.dbId;
-  }
-  async function drivePull(){
-    const url=`${DBSTATE.baseUrl}?db=${encodeURIComponent(DBSTATE.dbId)}`;
-    const r=await gmFetchJSON(url,{method:'GET'});
-    if(!r.json||r.json.error){ toast(`Pull failed (${r.status})`); throw new Error('pull failed'); }
-    DBSTATE.cache=r.json; if(!DBSTATE.cache.playlists) DBSTATE.cache.playlists={}; return DBSTATE.cache;
-  }
-  async function drivePush(){
-    if(!DBSTATE.cache) throw new Error('nothing to push');
-    const url=`${DBSTATE.baseUrl}?db=${encodeURIComponent(DBSTATE.dbId)}&op=put${DBSTATE.token?`&token=${encodeURIComponent(DBSTATE.token)}`:''}`;
-    const r=await gmFetchJSON(url,{method:'POST',headers:{'Content-Type':'application/json'},data:JSON.stringify(DBSTATE.cache)});
-    if(!r.json){ toast(`Push failed (${r.status})`); throw new Error('push failed'); }
-    if(r.json.error==='unauthorized') throw new Error('unauthorized (token?)');
-    if(r.json.error==='conflict'&&r.json.server){ DBSTATE.cache=mergeServer_(DBSTATE.cache,r.json.server); const r2=await gmFetchJSON(url,{method:'POST',headers:{'Content-Type':'application/json'},data:JSON.stringify(DBSTATE.cache)}); if(!r2.json||r2.json.error) throw new Error('push after merge failed'); try{ localStorage.setItem(REV_BROADCAST_KEY, String(Date.now())); }catch{} return true; }
-    if(r.json.error) throw new Error('push failed: '+r.json.error);
-    try{ localStorage.setItem(REV_BROADCAST_KEY, String(Date.now())); }catch{}
-    return true;
-  }
-  const mergeServer_=(local,server)=>{ const out=JSON.parse(JSON.stringify(server)); out.playlists=out.playlists||{}; const L=local.playlists||{}; for(const [name,pl] of Object.entries(L)){ const s=out.playlists[name]; if(!s){ out.playlists[name]=pl; continue; } const seen=new Set((s.items||[]).map(urlToKey)); const add=(pl.items||[]).filter(u=>!seen.has(urlToKey(u))); if(add.length) s.items=(s.items||[]).concat(add); s.savedAt=Math.max(+s.savedAt||0,+pl.savedAt||0); } out.version=server.version||local.version||1; out.sync=server.sync||{}; return out; };
-  const usingRemote=()=>DBSTATE.connected&&DBSTATE.cache;
-
-  // storage facade
-  const _readSaved=readSavedLocal,_writeSavedLocal=writeSavedLocal,_getIndex=getIndexLocal,_setIndex=setIndexLocal;
-  function readSaved(n){ return usingRemote()? (DBSTATE.cache.playlists[n]||{savedAt:0,items:[]}) : _readSaved(n); }
-  function writeSaved(n,p){ if(!usingRemote()) return _writeSavedLocal(n,p); DBSTATE.cache.playlists[n]={savedAt:p.savedAt||Date.now(),items:p.items||[]}; maybeAutoPush(); }
-  function getIndex(){ return usingRemote()? Object.keys(DBSTATE.cache.playlists).sort((a,b)=>a.localeCompare(b)) : _getIndex(); }
-  function setIndex(arr){ if(!usingRemote()) return _setIndex(arr); const want=new Set(arr.filter(Boolean)); for(const k of Object.keys(DBSTATE.cache.playlists)) if(!want.has(k)) delete DBSTATE.cache.playlists[k]; maybeAutoPush(); return [...want].sort((a,b)=>a.localeCompare(b)); }
-
-  // actions
-  function saveAs(name){ if(!name){toast('Enter a name');return} const urls=scrapeUrlsFromQueue(); if(!urls.length){toast('Playlist is empty');return} writeSaved(name,{savedAt:Date.now(),items:urls}); const idx=setIndex([...getIndex(),name]); refreshList(idx,name); toast(`Saved “${name}” (${urls.length})`); }
-
-  async function loadWhole(name,mode){ if(!name){toast('Pick a name');return} const {items=[]}=readSaved(name); const input=$('#mediaurl')||$('input#mediaurl')||$$('input').find(i=>i.id?.includes('mediaurl')||/url/i.test(i.placeholder||'')); const addEnd=$('#queue_end')||$('#addfromurl button.btn.btn-default:last-child')||$$('button').find(b=>/queue to end|queue|add/i.test(b.textContent||'')); if(!input||!addEnd){toast('Could not find Add controls');return} if(mode==='replace'){ const ok=await clearPlaylistRobust(); toast(ok?'Playlist cleared.':'Could not clear; loading anyway (append).'); } const current=getCurrentKeySet(); const toAdd=[]; for(const u of items){const k=urlToKey(u); if(!current.has(k)){toAdd.push(u); current.add(k);} } if(!toAdd.length){toast('Nothing to add');return} let i=0;(async function step(){ if(i>=toAdd.length){toast(`Loaded “${name}” (+${toAdd.length})`);return} input.value=toAdd[i++]; addEnd.click(); await sleep(180); step(); })(); }
-
-  const shuffle=(a)=>{for(let i=a.length-1;i>0;i--){const j=(Math.random()*(i+1))|0;[a[i],a[j]]=[a[j],a[i]]}return a};
-  async function addNFromSaved(name,count,where,rand){ if(!name){toast('Pick a playlist');return} const {items=[]}=readSaved(name); if(!items.length){toast('Saved list is empty');return} const current=getCurrentKeySet(); let pool=items.filter(u=>!current.has(urlToKey(u))); if(!pool.length){toast('Nothing to add');return} if(rand)shuffle(pool); const take=Math.max(1,Math.min(count|0,pool.length)); const sel=pool.slice(0,take); const input=$('#mediaurl')||$('input#mediaurl')||$$('input').find(i=>i.id?.includes('mediaurl')||/url/i.test(i.placeholder||'')); const addEndBtn=$('#queue_end')||$('#addfromurl button.btn.btn-default:last-child')||$$('button').find(b=>/queue to end|queue|add/i.test(b.textContent||'')); const addNextBtn=$('#queue_next')||$$('button').find(b=>/queue next|next/i.test(b.textContent||'')); if(!input||(!addEndBtn&&!addNextBtn)){toast('Could not find Add controls');return} const clicker=(where==='next'&&addNextBtn)?addNextBtn:addEndBtn; if(where==='next'&&!addNextBtn) toast('No “Queue Next”; adding to End.'); let i=0;(async function step(){ if(i>=sel.length){toast(`Added ${sel.length} from “${name}” (${where})`);return} input.value=sel[i++]; clicker.click(); await sleep(160); step(); })(); }
-
-  let addUrlInput=null; // expose for clearing
-  function appendUrlToSaved(name,url){ if(!name){toast('Pick a playlist');return} const u=String(url||'').trim(); if(!u){toast('Enter a URL');return} const data=readSaved(name); const keys=new Set((data.items||[]).map(urlToKey)); const k=urlToKey(u); if(keys.has(k)){toast('Already in list');return} data.items=[...(data.items||[]),u]; data.savedAt=Date.now(); writeSaved(name,data); try{ if(addUrlInput) { addUrlInput.value=''; addUrlInput.focus(); } }catch{} toast('Added to saved'); }
-
-  function appendCurrentQueueToSaved(name){ if(!name){toast('Pick a playlist');return} const add=scrapeUrlsFromQueue(); if(!add.length){toast('Current queue is empty');return} const data=readSaved(name); const keys=new Set((data.items||[]).map(urlToKey)); let added=0; for(const u of add){const k=urlToKey(u); if(!keys.has(k)){data.items.push(u); keys.add(k); added++;}} data.savedAt=Date.now(); writeSaved(name,data); toast(added?`Appended ${added}`:'All already present'); }
-
-  function openEditor(name){ if(!name){toast('Pick a playlist');return} const data=readSaved(name); const modal=document.createElement('div'); modal.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:100000;display:grid;place-items:center;'; const card=document.createElement('div'); card.style.cssText='width:min(900px,92vw);max-height:86vh;overflow:auto;background:rgba(18,18,18,.6);color:#fff;padding:14px;border-radius:16px;box-shadow:0 30px 80px rgba(0,0,0,.5);font:13px system-ui;backdrop-filter:blur(14px) saturate(140%);border:1px solid rgba(255,255,255,.18)'; const title=document.createElement('div'); title.textContent=`Edit: ${name}`; title.style.cssText='font-weight:700;margin-bottom:8px'; const ta=document.createElement('textarea'); ta.value=(data.items||[]).join('\n'); ta.style.cssText='width:100%;height:48vh;background:rgba(0,0,0,.35);color:#eee;padding:10px;border-radius:12px;border:1px solid rgba(255,255,255,.12)'; const row=document.createElement('div'); row.className='ct-row'; const btn=(label,fn)=>{const b=document.createElement('button'); b.textContent=label; b.className='ct-btn'; b.addEventListener('click',fn); return b;}; const dedupeBtn=btn('Dedupe',()=>{const lines=ta.value.split('\n').map(s=>s.trim()).filter(Boolean); const seen=new Set(); const out=[]; for(const u of lines){const k=urlToKey(u); if(!seen.has(k)){seen.add(k); out.push(u);} } ta.value=out.join('\n'); toast(`Deduped to ${out.length}`);}); const saveBtn=btn('Save',()=>{const lines=ta.value.split('\n').map(s=>s.trim()).filter(Boolean); writeSaved(name,{savedAt:Date.now(),items:lines}); toast('Saved'); document.body.removeChild(modal);}); const cancelBtn=btn('Cancel',()=>document.body.removeChild(modal)); row.append(dedupeBtn,saveBtn,cancelBtn); card.append(title,ta,row); modal.append(card); modal.addEventListener('click',(e)=>{if(e.target===modal)document.body.removeChild(modal)}); document.body.appendChild(modal); }
-
-  function deleteName(name){ if(!name){toast('Pick a name');return} localStorage.removeItem(KEY(name)); const idx=setIndex(getIndex().filter(n=>n!==name)); refreshList(idx,idx[0]||''); if(usingRemote()&&DBSTATE.cache&&DBSTATE.cache.playlists){ delete DBSTATE.cache.playlists[name]; } toast(`Deleted “${name}”`); }
-
-  // export/import
-  function exportAll(){ let payload; if(DBSTATE.connected&&DBSTATE.cache) payload=DBSTATE.cache; else { const all={}; for(const n of getIndexLocal()){ const raw=localStorage.getItem(KEY(n)); if(raw) all[n]=JSON.parse(raw);} payload={channel:channelName,data:all}; } const blob=new Blob([JSON.stringify(payload,null,2)],{type:'application/json'}); const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download=`cytube_saved_playlists_${channelName}.json`; a.click(); URL.revokeObjectURL(a.href); toast('Exported JSON'); }
-  function importAll(file){ const fr=new FileReader(); fr.onload=async()=>{ try{ const parsed=JSON.parse(fr.result); if(DBSTATE.connected&&DBSTATE.cache){ if(parsed.playlists) DBSTATE.cache=parsed; else if(parsed.data) DBSTATE.cache.playlists={...DBSTATE.cache.playlists,...parsed.data}; else DBSTATE.cache.playlists={...DBSTATE.cache.playlists,...parsed}; await drivePush().catch(()=>toast('Push failed after import')); refreshList(getIndex(),''); toast('Imported to remote DB'); } else { const data=parsed.data||parsed; let idx=getIndexLocal(); for(const [name,payload] of Object.entries(data)){ localStorage.setItem(KEY(name),JSON.stringify(payload)); idx.push(name);} idx=setIndexLocal(idx); refreshList(idx,idx[0]||''); toast('Imported playlists (local)'); } }catch{ toast('Import failed (bad JSON)'); } }; fr.readAsText(file); }
-
-  // auto sync
-  const isAutoPush =()=> localStorage.getItem(AUTOPUSH)==='1';
-  const setAutoPush=(v)=> localStorage.setItem(AUTOPUSH, v?'1':'0');
-  const isAutoPull =()=> { const v=localStorage.getItem(AUTOPULL); return v==null ? true : v==='1'; };
-  const setAutoPull=(v)=> localStorage.setItem(AUTOPULL, v?'1':'0');
-  const getPullMs =()=>{ const n=Number(localStorage.getItem(AUTOPULL_MS_KEY)); return Number.isFinite(n)&&n>=MIN_PULL_MS ? n : DEFAULT_PULL_MS; };
-  async function maybeAutoPush(){ if(DBSTATE.connected&&DBSTATE.cache&&isAutoPush()){ try{ await drivePush(); }catch(e){ console.error(e); toast('Auto-push failed'); } } }
-  let pullTimer=null; const currentRev=()=>String(DBSTATE?.cache?.sync?.rev||'');
-  function startAutoPull(){ stopAutoPull(); if(!DBSTATE.connected) return; if(!isAutoPull()) return; let pulling=false; const pullNow=async()=>{ if(pulling) return; pulling=true; try{ const before=currentRev(); await drivePull(); const after=currentRev(); if(before!==after){ refreshList(getIndex(),''); } }catch(e){} finally{ pulling=false; updateStatusChips(); } }; pullTimer=setInterval(pullNow, getPullMs()); pullNow(); document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='visible') pullNow(); }); window.addEventListener('storage', (e)=>{ if(e.key===REV_BROADCAST_KEY) pullNow(); }); }
-  function stopAutoPull(){ if(pullTimer){ clearInterval(pullTimer); pullTimer=null; } }
-
-  // CSS
-  function injectGlassCSS(){ if($('#ct-savedpl-style')) return; const css=`
-#ct-savedpl-panel{position:fixed;top:16px;left:50%;transform:translateX(-50%);z-index:9999;margin:0;max-width:min(1100px,96vw);backdrop-filter:blur(16px) saturate(160%);-webkit-backdrop-filter:blur(16px) saturate(160%);background:rgba(20,20,22,.55);color:#fff;border-radius:16px;border:1px solid rgba(255,255,255,.18);box-shadow:0 20px 60px rgba(0,0,0,.45);font:12px/1.2 system-ui}
-#ct-savedpl-header{display:flex;align-items:center;gap:10px;padding:10px 12px;cursor:pointer}
-#ct-savedpl-title{font-weight:700;letter-spacing:.2px}
-.ct-chip{padding:4px 8px;border-radius:12px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.14)}
-#ct-savedpl-body{overflow:hidden;transition:max-height .25s ease, opacity .2s ease;opacity:1}
-.ct-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:8px 12px}
-.ct-sep{height:1px;background:linear-gradient(90deg,transparent,rgba(255,255,255,.18),transparent);margin:4px 0}
-.ct-btn{padding:6px 10px;cursor:pointer;border-radius:12px;border:1px solid rgba(255,255,255,.16);background:rgba(255,255,255,.08);color:#fff}
-.ct-input,.ct-select{padding:6px 8px;border-radius:10px;border:1px solid rgba(255,255,255,.16);background:rgba(34,34,38,.9);color:#fff;min-height:28px;appearance:none;-webkit-appearance:none;-moz-appearance:none}
-.ct-select option{background:#1a1b1e;color:#fff}
-.ct-tight{padding:4px 8px}
-.ct-caret{user-select:none;font-size:14px;opacity:.9}
-#ct-db-section{overflow:hidden;transition:max-height .25s ease, opacity .2s ease;opacity:1}
-#ct-db-head{display:flex;align-items:center;gap:10px;padding:6px 12px}
-#ct-status{margin-left:auto}
-`; const style=document.createElement('style'); style.id='ct-savedpl-style'; style.textContent=css; document.head.appendChild(style);}
-
-  // status chips
-  function updateStatusChips(){ const txt=(DBSTATE.connected&&DBSTATE.dbId)?`Connected (${String(DBSTATE.dbId).slice(0,8)}…)`:'Local (offline)'; const header=$('#ct-status'); if(header) header.textContent=txt; const dbchip=$('#ct-db-head .ct-chip'); if(dbchip) dbchip.textContent=txt; }
-
-  // UI globals
-  let selectEl,modeEl,whereEl,countEl,nameInput;
-
-  function refreshList(names,selectName){ if(!selectEl) return; selectEl.innerHTML=''; const ph=document.createElement('option'); ph.value=''; ph.textContent='(choose a playlist)'; selectEl.appendChild(ph); for(const n of names){ const o=document.createElement('option'); o.value=n; o.textContent=n; if(n===selectName) o.selected=true; selectEl.appendChild(o);} }
-  function button(label,fn){ const b=document.createElement('button'); b.textContent=label; b.className='ct-btn'; b.addEventListener('click',fn); return b; }
-
-  function attachDatabaseUI(container){
-    const wrap=document.createElement('div');
-    const head=document.createElement('div'); head.id='ct-db-head';
-    const caret=document.createElement('span'); caret.className='ct-caret ct-btn ct-tight'; caret.textContent='▾';
-    const title=document.createElement('span'); title.textContent='Database';
-    const statusChip=document.createElement('span'); statusChip.className='ct-chip';
-
-    // Toggles
-    const autoPushChip=document.createElement('label'); autoPushChip.className='ct-chip'; autoPushChip.style.cursor='pointer';
-    const autoPushCb=document.createElement('input'); autoPushCb.type='checkbox'; autoPushCb.style.marginRight='6px'; autoPushCb.checked=isAutoPush();
-    autoPushChip.append(autoPushCb, document.createTextNode('Auto-Push'));
-
-    const autoPullChip=document.createElement('label'); autoPullChip.className='ct-chip'; autoPullChip.style.cursor='pointer';
-    const autoPullCb=document.createElement('input'); autoPullCb.type='checkbox'; autoPullCb.style.marginRight='6px'; autoPullCb.checked=isAutoPull();
-    autoPullChip.append(autoPullCb, document.createTextNode('Auto-Sync'));
-
-    head.append(caret,title,statusChip,autoPushChip,autoPullChip);
-
-    const body=document.createElement('div'); body.id='ct-db-section';
-    const row=document.createElement('div'); row.className='ct-row';
-
-    autoPushCb.addEventListener('change',()=>{ setAutoPush(autoPushCb.checked); if(autoPushCb.checked) maybeAutoPush(); });
-    autoPullCb.addEventListener('change',()=>{ setAutoPull(autoPullCb.checked); if(autoPullCb.checked) startAutoPull(); else stopAutoPull(); });
-
-    const createBtn=button('Create', async()=>{
-      const baseUrl=prompt('Paste your Google Apps Script Web App URL (ends with /exec):', DBSTATE.baseUrl||''); if(!baseUrl) return;
-      try{ const dbId=await driveInit(baseUrl); DBSTATE.baseUrl=baseUrl; DBSTATE.dbId=dbId; DBSTATE.connected=true; await drivePull(); saveConnPerChannel(); updateStatusChips(); refreshList(getIndex(),''); startAutoPull(); toast('Database created & connected.'); }
-      catch(e){ console.error(e); toast('Create failed'); }
-    });
-    const connectBtn=button('Connect', async()=>{
-      const link=prompt('Paste DB link (https://.../exec?db=UUID[&token=SECRET])',''); if(!link) return;
-      try{ const u=new URL(link); DBSTATE.baseUrl=link.split('?')[0]; DBSTATE.dbId=u.searchParams.get('db')||''; DBSTATE.token=u.searchParams.get('token')||''; if(!DBSTATE.dbId){ toast('Missing db param'); return; } DBSTATE.connected=true; await drivePull(); saveConnPerChannel(); updateStatusChips(); refreshList(getIndex(),''); startAutoPull(); toast('Connected.'); }
-      catch(e){ console.error(e); toast('Connect failed'); }
-    });
-
-    const pullBtn=button('Pull now', async()=>{ try{ await drivePull(); refreshList(getIndex(),''); updateStatusChips(); toast('Pulled.'); }catch(e){ toast('Pull failed'); }});
-    const pushBtn=button('Push', async()=>{ if(!DBSTATE.connected){toast('Not connected');return} try{ await drivePush(); toast('Pushed.'); }catch(e){ console.error(e); toast(String(e.message||e)); } });
-    const copyBtn=button('Copy Link',()=>{ if(!DBSTATE.connected){toast('Not connected');return} const link=`${DBSTATE.baseUrl}?db=${encodeURIComponent(DBSTATE.dbId)}${DBSTATE.token?`&token=${encodeURIComponent(DBSTATE.token)}`:''}`; navigator.clipboard.writeText(link).then(()=>toast('DB link copied')); });
-    const debugBtn=button('Debug',()=>{ alert(`[CyTube DB Debug]\nconnected: ${DBSTATE.connected}\nbaseUrl: ${DBSTATE.baseUrl}\ndbId: ${DBSTATE.dbId}\ntokenSet: ${DBSTATE.token?'yes':'no'}\ncache?: ${DBSTATE.cache?'yes':'no'}\nautoPush: ${isAutoPush()?'on':'off'}\nautoPull: ${isAutoPull()?'on':'off'}\npullMs: ${getPullMs()} ms`); });
-    const discBtn=button('Disconnect',()=>{ DBSTATE.connected=false; DBSTATE.baseUrl=''; DBSTATE.dbId=''; DBSTATE.token=''; DBSTATE.cache=null; localStorage.removeItem(`ct_db_conn:${channelName}`); updateStatusChips(); refreshList(getIndex(),''); stopAutoPull(); toast('Disconnected (local mode).'); });
-
-    row.append(createBtn,connectBtn,pullBtn,pushBtn,copyBtn,debugBtn,discBtn);
-    body.append(row);
-
-    function syncDbCollapsedUI(){ const collapsed=localStorage.getItem(UIKEY_DB)==='1'; caret.textContent=collapsed?'▸':'▾'; if(!collapsed){ body.style.maxHeight='none'; body.style.opacity='1'; body.setAttribute('aria-hidden','false'); } else { body.style.maxHeight=(body.scrollHeight||0)+'px'; requestAnimationFrame(()=>{ body.style.maxHeight='0px'; body.style.opacity='0'; body.setAttribute('aria-hidden','true'); }); } }
-    const toggleDb=()=>{
-      const now=localStorage.getItem(UIKEY_DB)==='1'?'0':'1';
-      localStorage.setItem(UIKEY_DB,now);
-      if(now==='0'){
-        body.style.maxHeight=body.scrollHeight+'px';
-        body.style.opacity='1';
-        body.setAttribute('aria-hidden','false');
-        setTimeout(()=>{ body.style.maxHeight='none'; },260);
+  /* ----------------------- GM fetch (with fallback) ---------------------- */
+  function gmFetch(url, opts){
+    opts=opts||{}; var method=opts.method||'GET'; var headers=opts.headers||{}; var data=opts.data||null; var responseType=opts.responseType||'text';
+    return new Promise(function(resolve, reject){
+      if (typeof GM_xmlhttpRequest !== 'function'){
+        fetch(url, { method: method, headers: headers, body: data })
+          .then(function(r){ return r.text().then(function(text){ resolve({status:r.status, responseText:text}); }); })
+          .catch(reject);
+        return;
       }
-      // also make sure the main panel body can grow when DB expands
-      try{
-        const mainBody=document.getElementById('ct-savedpl-body');
-        if(mainBody){
-          if(now==='0'){ // expanding DB
-            mainBody.style.maxHeight='none';
-            mainBody.style.opacity='1';
+      GM_xmlhttpRequest({ url:url, method:method, headers:headers, data:data, responseType:responseType,
+        onload:resolve, onerror:reject, ontimeout:function(){ reject(new Error('GM timeout')); } });
+    });
+  }
+  function gmFetchJSON(url, opts){
+    return gmFetch(url, Object.assign({}, opts||{}, {responseType:'text'}))
+      .then(function(r){ var text=r.responseText||''; var json=null; try{ json=JSON.parse(text); }catch(e){} return { json: json, status: r.status, text: text }; });
+  }
+
+  /* ----------------------- URL + dedupe helpers ---------------------- */
+  function parseYouTubeId(u){
+    try{
+      var url=new URL(u);
+      if(url.hostname==='youtu.be') return url.pathname.slice(1);
+      if(/youtube\.com$/i.test(url.hostname)){
+        if(url.pathname==='/watch') return url.searchParams.get('v')||'';
+        if(url.pathname.indexOf('/shorts/')===0) return (url.pathname.split('/')[2]||'');
+        var m=url.pathname.match(/^\/embed\/([^/?#]+)/); if(m) return m[1];
+      }
+    }catch(e){}
+    return '';
+  }
+  function urlToKey(u){
+    var s=String(u||'').trim(); if(!s) return '';
+    try{
+      var url=new URL(s, location.href);
+      if(/(youtu\.be|youtube\.com)$/i.test(url.hostname)){
+        var id=parseYouTubeId(url.href); return id?('yt:'+id):('url:'+url.origin+url.pathname+url.search);
+      }
+      var host=url.hostname.replace(/^www\./,''); return 'url:'+host+':'+url.pathname+url.search;
+    }catch(e){ return 'url:'+s; }
+  }
+
+  function scrapeUrlsFromQueue(){
+    var out=[]; var list=$$('#queue .queue_entry, .queue_item');
+    for(var i=0;i<list.length;i++){ var el=list[i]; var a=el.querySelector('a[href]'); if(a&&a.href) out.push(a.href); }
+    if(!out.length){
+      var anchors=$$('#queue a, #playlist a, .queue a, .qe_title a');
+      for(var j=0;j<anchors.length;j++){ var a2=anchors[j]; if(a2&&a2.href) out.push(a2.href); }
+    }
+    return out;
+  }
+  function scrapeCurrentQueueKeys(){
+    var keys=[]; var list=$$('#queue .queue_entry, .queue_item');
+    for(var i=0;i<list.length;i++){
+      var el=list[i];
+      var svc=(safeDataset(el,'service')||(getAttr(el,'data-service')||'')).toLowerCase();
+      var id =(safeDataset(el,'id')||(getAttr(el,'data-id')||''));
+      if(svc&&id){ if(svc==='yt') keys.push('yt:'+id); else if(svc==='dm') keys.push('dm:'+id); else keys.push('url:'+svc+':'+id); continue; }
+      var a=el.querySelector('a[href]'); if(a&&a.href) keys.push(urlToKey(a.href));
+    }
+    if(!keys.length){
+      var anchors=$$('#queue a, #playlist a, .queue a, .qe_title a');
+      for(var k=0;k<anchors.length;k++){ var a2=anchors[k]; if(a2&&a2.href) keys.push(urlToKey(a2.href)); }
+    }
+    return keys;
+  }
+  function getCurrentKeySet(){ return new Set(scrapeCurrentQueueKeys()); }
+  function getQueueCount(){ return $$('#queue .queue_entry').length || $$('.queue .queue_entry').length || $$('.queue_item').length || 0; }
+
+  /* ----------------------- Clear (Replace) ----------------------- */
+  function clearPlaylistRobust(){
+    return new Promise(function(resolve){
+      (async function(){
+        try{
+          if(window.socket && hasFn(window.socket,'emit')){
+            window.socket.emit('playlistClear');
+            for(var i=0;i<15;i++){ if(getQueueCount()===0) return resolve(true); await sleep(100); }
           }
+        }catch(e){}
+        var btn=null; var candidates=$$('button, .btn, a');
+        for(var ii=0;ii<candidates.length;ii++){
+          var b=candidates[ii]; var txt=(b.textContent||''); var tit=getAttr(b,'title');
+          if(/clear/i.test(txt) || /clear/i.test(tit)){ btn=b; break; }
         }
-      }catch{}
-      syncDbCollapsedUI();
-    };
-    caret.addEventListener('click',toggleDb);
-    head.addEventListener('click',(e)=>{ if(e.target!==caret) toggleDb(); });
-
-    wrap.append(head,body); container.append(wrap);
-    updateStatusChips(); syncDbCollapsedUI();
+        if(btn){
+          btn.click(); await sleep(80);
+          var confirmBtn=null; var buttons=$$('button, .btn, a');
+          for(var jj=0;jj<buttons.length;jj++){
+            var bb=buttons[jj]; if(/confirm|yes|ok/i.test(bb.textContent||'') && bb.offsetParent){ confirmBtn=bb; break; }
+          }
+          if(confirmBtn) confirmBtn.click();
+          for(var kk=0;kk<80;kk++){ if(getQueueCount()===0) return resolve(true); await sleep(100); }
+        }
+        resolve(false);
+      })();
+    });
   }
 
-  function injectUI(){
-    try{
-      if($('#ct-savedpl-panel')) return;
-      injectGlassCSS();
-      const panel=document.createElement('div'); panel.id='ct-savedpl-panel';
-      const header=document.createElement('div'); header.id='ct-savedpl-header';
-      const caret=document.createElement('span'); caret.className='ct-caret ct-btn ct-tight'; caret.textContent='▾';
-      const title=document.createElement('div'); title.id='ct-savedpl-title'; title.textContent='Saved Playlists';
-      const chan=document.createElement('span'); chan.className='ct-chip'; chan.textContent=`${channelName}`;
-      const status=document.createElement('span'); status.id='ct-status'; status.className='ct-chip'; status.textContent='Local (offline)';
-      header.append(caret,title,chan,status); panel.append(header);
+  /* ------------------ Load/Save ops (MODIFIED FOR TOAST REDUCTION) ------------------ */
+  function saveAs(name){
+    if(!name){ toast('Enter a name'); return; }
+    var urls=scrapeUrlsFromQueue(); if(!urls.length){ toast('Playlist is empty'); return; }
+    writeSaved(name,{savedAt:Date.now(),items:urls});
 
-      const body=document.createElement('div'); body.id='ct-savedpl-body'; panel.append(body);
+    var localIdx = setIndex(getIndex().concat([name]));
 
-      const row1=document.createElement('div'); row1.className='ct-row';
-      const row2=document.createElement('div'); row2.className='ct-row';
-      const row3=document.createElement('div'); row3.className='ct-row';
-      const row4=document.createElement('div'); row4.className='ct-row';
-      const row5=document.createElement('div'); row5.className='ct-row';
+    if(usingRemote()){
+      drivePush().then(function(){
+        // Everything succeeded, including the critical post-push drivePull
+        refreshList(localIdx, name);
+        toast('Saved "'+name+'" ('+urls.length+')');
+      }).catch(function(e){
+        // If drivePush failed, it's either the push itself or the post-push pull/resync (the common case)
+        console.warn('Push failed after saveAs. Attempting final pull...', e);
+        // NOTE: Removing the first "Push failed" toast. The final result (success/failure) is what matters.
 
-      // Row 1 — Load/Delete
-      const select=document.createElement('select'); select.className='ct-select'; select.style.minWidth='180px'; selectEl=select;
-      const mode=document.createElement('select'); mode.className='ct-select'; mode.innerHTML='<option value="replace">Replace</option><option value="append">Append</option>'; modeEl=mode;
-      const loadBtn=button('Load (All)',()=>loadWhole(selectEl.value, modeEl.value));
-      const delBtn=button('Delete',()=>deleteName(selectEl.value));
-      row1.append(selectEl,modeEl,loadBtn,delBtn);
+        drivePull(1, 1500).then(function(){ // Final check (single attempt)
+            refreshList(localIdx, name);
+            toast('Saved and re-synced successfully!'); // Success confirmation
+        }).catch(function(){
+            // Still failed to pull (likely server lag/issue)
+            refreshList(localIdx, name); // Still update the list based on the local cache
+            toast('Save sync failed. Saved locally. Please re-connect if data did not sync.');
+        });
+      });
+    } else {
+      refreshList(localIdx, name);
+      toast('Saved "'+name+'" ('+urls.length+')');
+      maybeBroadcast();
+    }
+  }
 
-      // Row 2 — Add N
-      const whereSel=document.createElement('select'); whereSel.className='ct-select'; whereSel.innerHTML='<option value="next">Next</option><option value="end">End</option>'; whereEl=whereSel;
-      const countInput=document.createElement('input'); countInput.type='number'; countInput.min='1'; countInput.value='5'; countInput.className='ct-input'; countInput.style.width='72px'; countEl=countInput;
-      const randomWrap=document.createElement('label'); randomWrap.className='ct-chip'; randomWrap.style.cursor='pointer';
-      const randomCb=document.createElement('input'); randomCb.type='checkbox'; randomCb.checked=true; randomCb.style.marginRight='6px';
-      randomWrap.append(randomCb, document.createTextNode('Random'));
-      const addNBtn=button('Add N',()=>{ const n=parseInt(countEl.value,10)||1; const where=whereEl.value; addNFromSaved(selectEl.value,n,where,randomCb.checked); });
-      row2.append(whereEl,countEl,randomWrap,addNBtn);
+  function createNewEmptyPlaylist(name, openEditorAfter){
+    if(openEditorAfter===void 0) openEditorAfter=true;
+    var n=String(name||'').trim(); if(!n){ toast('Enter a name'); return; }
+    var existing=readSaved(n); var existsIdx=getIndex().indexOf(n)>=0; var hasItems=(existing.items||[]).length>0;
+    if((existsIdx||hasItems) && !confirm('"'+n+'" exists. Clear its items and continue?')) return;
 
-      // Row 3 — Save As
-      const nameIn=document.createElement('input'); nameIn.placeholder='Save As… (name)'; nameIn.className='ct-input'; nameIn.style.minWidth='180px'; nameInput=nameIn;
-      const saveBtn=button('Save As',()=>saveAs(nameInput.value.trim()));
-      row3.append(nameInput,saveBtn);
+    writeSaved(n,{savedAt:Date.now(),items:[]});
+    var localIdx=setIndex(getIndex().concat([n]));
 
-      // Row 4 — Edit/Append
-      const urlIn=document.createElement('input'); urlIn.placeholder='Add URL to saved…'; urlIn.className='ct-input'; urlIn.style.minWidth='260px'; addUrlInput=urlIn;
-      const addUrlBtn=button('Add URL',()=>appendUrlToSaved(selectEl.value, addUrlInput.value));
-      const addCurrentBtn=button('Add Current',()=>appendCurrentQueueToSaved(selectEl.value));
-      const editBtn=button('Edit…',()=>openEditor(selectEl.value));
-      row4.append(addUrlInput,addUrlBtn,addCurrentBtn,editBtn);
+    if(usingRemote()){
+      drivePush().then(function(){
+        // Everything succeeded, including the critical post-push drivePull
+        refreshList(localIdx, n);
+        toast('Created empty playlist');
+      }).catch(function(e){
+        console.warn('Push failed after create. Attempting final pull...', e);
+        // NOTE: Removing the first "Push failed" toast.
 
-      // Row 5 — Utilities
-      const listBtn=button('List',()=>toast(getIndex().join(', ')||'No saved playlists'));
-      const exportBtn=button('Export',exportAll);
-      const importInput=document.createElement('input'); importInput.type='file'; importInput.accept='application/json'; importInput.style.display='none';
-      importInput.addEventListener('change',()=>{ if(importInput.files?.[0]) importAll(importInput.files[0]); importInput.value=''; });
-      const importBtn=button('Import',()=>importInput.click());
-      row5.append(listBtn,exportBtn,importBtn,importInput);
+        drivePull(1, 1500).then(function(){
+            refreshList(localIdx, n);
+            toast('Created and re-synced successfully!');
+        }).catch(function(){
+            refreshList(localIdx, n);
+            toast('Create sync failed. Created locally. Please re-connect if data did not sync.');
+        });
+      });
+    } else {
+      refreshList(localIdx, n);
+      toast('Created empty playlist');
+    }
 
-      const sep=()=>{ const d=document.createElement('div'); d.className='ct-sep'; return d; };
-      body.append(row1,sep(),row2,sep(),row3,sep(),row4,sep(),row5,sep());
+    if(selectEl) selectEl.value=n;
+    if(openEditorAfter) openEditor(n);
+  }
 
-      attachDatabaseUI(body);
+  function loadWhole(name,mode,where){
+    if(!name){ toast('Pick a name'); return; }
+    where = where || 'end';
+    var pack=readSaved(name); var items=pack.items||[];
+    var input=$('#mediaurl')||$('input#mediaurl')||$$('input').find(function(i){
+      var id=i&&i.id?i.id+'' : ''; var ph=i&&i.placeholder?i.placeholder+'' : '';
+      return (id.indexOf('mediaurl')>=0)||(/url/i.test(ph));
+    });
+    var addEndBtn=$('#queue_end')||$$('button').find(function(b){ return /queue to end|queue|add/i.test(b.textContent||''); });
+    var addNextBtn=$('#queue_next')||$$('button').find(function(b){ return /queue next|next/i.test(b.textContent||''); });
+    if(!input||(!addEndBtn && !addNextBtn)){ toast('Could not find Add controls'); return; }
 
-      document.body.prepend(panel);
-      refreshList(getIndex(),'');
+    var clicker = (where==='next' && addNextBtn) ? addNextBtn : addEndBtn;
+    if(where==='next' && !addNextBtn) toast('No "Queue Next" found; adding to End.');
 
-      // Collapsible main
-      function syncMain(){
-        const collapsed=localStorage.getItem(UIKEY_MAIN)==='1';
-        caret.textContent=collapsed?'▸':'▾';
-        const ensureAuto=()=>{ body.style.maxHeight='none'; body.style.opacity='1'; };
-        if(collapsed){
-          // collapse with transition
-          body.style.maxHeight = (body.scrollHeight||0)+'px';
-          requestAnimationFrame(()=>{ body.style.maxHeight='0px'; body.style.opacity='0'; });
+    // Use an IIFE with async/await internally
+    (async function(){
+      if(mode==='replace'){
+        var ok=await clearPlaylistRobust();
+        toast(ok? 'Playlist cleared.' : 'Could not clear (need perms). Loading anyway (append).');
+      }
+      var current=getCurrentKeySet(), toAdd=[];
+      for(var i=0;i<items.length;i++){ var u=items[i]; var k=urlToKey(u); if(!current.has(k)){ toAdd.push(u); current.add(k);} }
+      if(!toAdd.length){ toast('Nothing to add (all present).'); return; }
+      var idx=0; (async function step(){ if(idx>=toAdd.length){ toast('Loaded "'+name+'" (+'+toAdd.length+' new, '+where+')'); return; } input.value=toAdd[idx++]; clicker.click(); await sleep(160); step(); })();
+    })();
+  }
+
+  function shuffleInPlace(a){ for(var i=a.length-1;i>0;i--){ var j=(Math.random()*(i+1))|0; var t=a[i]; a[i]=a[j]; a[j]=t; } }
+  function addNFromSaved(name,count,where,randomize){
+    if(where===void 0) where='end'; if(randomize===void 0) randomize=true;
+    if(!name){ toast('Pick a name'); return; }
+    var pack=readSaved(name); var items=pack.items||[];
+    var current=getCurrentKeySet(); var pool=[];
+    for(var i=0;i<items.length;i++){ var u=items[i]; var k=urlToKey(u); if(!current.has(k)){ pool.push(u); current.add(k);} }
+    if(!pool.length){ toast('Nothing to add (all present).'); return; }
+    if(randomize) shuffleInPlace(pool);
+    var take=Math.max(0, Math.min((count|0), pool.length)) || 1; var selected=pool.slice(0,take);
+    var input=$('#mediaurl')||$('input#mediaurl')||$$('input').find(function(i){
+      var id=i&&i.id?i.id+'' : ''; var ph=i&&i.placeholder?i.placeholder+'' : '';
+      return (id.indexOf('mediaurl')>=0)||(/url/i.test(ph));
+    });
+    var addEndBtn=$('#queue_end')||$$('button').find(function(b){ return /queue to end|queue|add/i.test(b.textContent||''); });
+    var addNextBtn=$('#queue_next')||$$('button').find(function(b){ return /queue next|next/i.test(b.textContent||''); });
+    if(!input||(!addEndBtn && !addNextBtn)){ toast('Could not find Add controls'); return; }
+    var clicker=(where==='next' && addNextBtn)?addNextBtn:addEndBtn;
+    if(where==='next' && !addNextBtn) toast('No "Queue Next" found; adding to End.');
+    var idx=0; (async function step(){ if(idx>=selected.length){ toast('Added '+selected.length+' from "'+name+'" ('+where+')'); return; } input.value=selected[idx++]; clicker.click(); await sleep(160); step(); })();
+  }
+
+  function appendUrlToSaved(name,url){
+    if(!name){ toast('Pick a playlist'); return; }
+    var u=String(url||'').trim(); if(!u){ toast('Enter a URL'); return; }
+    var data=readSaved(name); var keys=new Set((data.items||[]).map(urlToKey)); var k=urlToKey(u);
+    if(keys.has(k)){ toast('Already in list'); return; }
+    data.items=(data.items||[]).concat([u]); data.savedAt=Date.now();
+
+    writeSaved(name,data);
+
+    if(usingRemote()){
+      drivePush().then(function(){
+        toast('Added to saved');
+      }).catch(function(e){
+        console.warn('Push failed after add URL. Attempting final pull...', e);
+        // NOTE: Removing the first "Push failed" toast.
+
+        drivePull(1, 1500).then(function(){
+            toast('Added and re-synced successfully!');
+        }).catch(function(){
+            toast('Add URL sync failed. Saved locally. Please re-connect if data did not sync.');
+        });
+      });
+    } else {
+      toast('Added to saved');
+      maybeBroadcast();
+    }
+  }
+
+  function appendCurrentQueueToSaved(name){
+    if(!name){ toast('Pick a playlist'); return; }
+    var add=scrapeUrlsFromQueue(); if(!add.length){ toast('Current queue is empty'); return; }
+    var data=readSaved(name); var keys=new Set((data.items||[]).map(urlToKey)); var added=0;
+    for(var i=0;i<add.length;i++){ var u=add[i]; var k=urlToKey(u); if(!keys.has(k)){ data.items.push(u); keys.add(k); added++; } }
+
+    if (added === 0) {
+      toast('All already present');
+      return;
+    }
+
+    data.savedAt=Date.now();
+    writeSaved(name,data);
+
+    if(usingRemote()){
+      drivePush().then(function(){
+        toast('Appended '+added+' item(s)');
+      }).catch(function(e){
+        console.warn('Push failed after add current. Attempting final pull...', e);
+        // NOTE: Removing the first "Push failed" toast.
+
+        drivePull(1, 1500).then(function(){
+            toast('Appended and re-synced successfully!');
+        }).catch(function(){
+            toast('Add current sync failed. Saved locally. Please re-connect if data did not sync.');
+        });
+      });
+    } else {
+      toast('Appended '+added+' item(s)');
+      maybeBroadcast();
+    }
+  }
+
+  function openEditor(name){
+    if(!name){ toast('Pick a playlist'); return; }
+    var data=readSaved(name);
+    var modal=document.createElement('div'); modal.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:100000;display:grid;place-items:center;';
+    var card=document.createElement('div'); card.style.cssText='width:min(900px,92vw);max-height:86vh;overflow:auto;padding:14px;background:rgba(24,26,30,.85);color:#e9ecf1;border-radius:14px;backdrop-filter:blur(14px) saturate(140%);border:1px solid rgba(255,255,255,.18);';
+    var title=document.createElement('div'); title.textContent='Edit: '+name; title.style.cssText='font-weight:700;margin-bottom:8px;';
+    var ta=document.createElement('textarea'); ta.value=(data.items||[]).join('\n'); ta.style.cssText='width:100%;height:48vh;background:rgba(255,255,255,.06);color:#fff;border:1px solid rgba(255,255,255,.14);border-radius:12px;padding:10px;';
+    var row=document.createElement('div'); row.style.cssText='display:flex;gap:8px;margin-top:10px;flex-wrap:wrap;';
+    function btn(label,fn){ var b=document.createElement('button'); b.textContent=label; b.style.cssText='background:rgba(255,255,255,.08);color:#fff;border:1px solid rgba(255,255,255,.18);padding:8px 12px;border-radius:12px;cursor:pointer;'; b.addEventListener('click',fn); return b; }
+    var dedupeBtn=btn('Dedupe', function(){ var lines=ta.value.split('\n').map(function(s){return s.trim();}).filter(Boolean); var seen=new Set(); var out=[]; for(var i=0;i<lines.length;i++){ var u=lines[i]; var k=urlToKey(u); if(!seen.has(k)){ seen.add(k); out.push(u); } } ta.value=out.join('\n'); toast('Deduped to '+out.length); });
+
+    var saveBtn=btn('Save', function(){
+      var lines=ta.value.split('\n').map(function(s){return s.trim();}).filter(Boolean);
+      writeSaved(name,{savedAt:Date.now(),items:lines});
+
+      if(modal.parentNode) modal.parentNode.removeChild(modal); // Close modal immediately
+
+      if(usingRemote()){
+        drivePush().then(function(){
+          toast('Saved');
+        }).catch(function(e){
+          console.warn('Push failed after edit. Attempting final pull...', e);
+          // NOTE: Removing the first "Push failed" toast.
+
+          drivePull(1, 1500).then(function(){
+              toast('Saved and re-synced successfully!');
+          }).catch(function(){
+              toast('Edit sync failed. Saved locally. Please re-connect if data did not sync.');
+          });
+        });
+      } else {
+        toast('Saved');
+        maybeBroadcast();
+      }
+    });
+
+    var cancelBtn=btn('Cancel', function(){ if(modal.parentNode) modal.parentNode.removeChild(modal); });
+    row.appendChild(dedupeBtn); row.appendChild(saveBtn); row.appendChild(cancelBtn);
+    card.appendChild(title); card.appendChild(ta); card.appendChild(row); modal.appendChild(card);
+    modal.addEventListener('click', function(e){ if(e.target===modal && modal.parentNode) modal.parentNode.removeChild(modal); });
+    document.body.appendChild(modal);
+  }
+
+  function deleteName(name){ // Revert to non-async
+    if(!name){ toast('Pick a name'); return; }
+
+    if(!usingRemote()) {
+        localStorage.removeItem(KEY(name));
+        var idx=setIndex(getIndex().filter(function(n){return n!==name;}));
+        refreshList(idx, idx[0]||'');
+        toast('Deleted "'+name+'" (local)');
+        maybeBroadcast();
+        return;
+    }
+
+    // For remote: remove from local cache first, then push
+    // Optimistically update the remote cache (this is the state we want to push)
+    if(DBSTATE.cache && DBSTATE.cache.playlists) {
+        delete DBSTATE.cache.playlists[name];
+    }
+
+    drivePush().then(function(){
+      // SUCCESS: Update local index/UI only on successful push/resync
+      var idx=setIndex(getIndex()); // Re-reads the index from the newly pulled cache
+      refreshList(idx, idx[0]||'');
+      toast('Deleted "'+name+'"');
+    }).catch(function(e){
+      console.warn('Push/Resync failed immediately after push. Attempting final pull...', e);
+
+      // FAILURE: The push/resync failed (likely resync failure due to delay).
+      // NOTE: Temporarily showing the first message to inform the user a check is happening
+      toast('Push succeeded, but immediate re-sync failed. Checking server...');
+
+      // We must force a pull to get the definitive state from the server.
+      drivePull(1, 1500).then(function(){ // Final check (single attempt)
+          // If this pull succeeds, it means the local state was just stale (push probably succeeded).
+          refreshList(getIndex(), getIndex()[0]||'');
+          toast('Item deleted! Server state reloaded successfully.'); // <-- UPDATED SUCCESS MESSAGE
+      }).catch(function(){
+          // If the final pull fails, we show a critical error.
+          toast('Delete operation failed to confirm. Please reload/re-connect.'); // <-- UPDATED FAILURE MESSAGE
+      });
+    });
+  }
+
+  function importAll(file){ // Revert to non-async
+    var fr=new FileReader();
+    fr.onload=function(){ // Revert to non-async
+      try{
+        var parsed=JSON.parse(fr.result);
+        if(DBSTATE.connected && DBSTATE.cache){
+          if(parsed.playlists) DBSTATE.cache=parsed;
+          else if(parsed.data) DBSTATE.cache.playlists=Object.assign({}, DBSTATE.cache.playlists, parsed.data);
+          else DBSTATE.cache.playlists=Object.assign({}, DBSTATE.cache.playlists, parsed);
+
+          drivePush().then(function(){
+            refreshList(getIndex(),'');
+            toast('Imported to remote DB');
+          }).catch(function(e){
+            console.warn('Push failed after import. Attempting final pull...', e);
+            // NOTE: Removing the first "Push failed" toast.
+
+            drivePull(1, 1500).then(function(){
+                refreshList(getIndex(),'');
+                toast('Imported and re-synced successfully!');
+            }).catch(function(){
+                toast('Import sync failed. Saved locally. Please re-connect if data did not sync.');
+            });
+          });
         } else {
-          // expand and then free the height so inner sections can grow
-          body.style.maxHeight = (body.scrollHeight||0)+'px';
-          body.style.opacity='1';
-                   setTimeout(ensureAuto, 260);
+          var data=parsed.data||parsed; var idx=getIndex();
+          Object.keys(data).forEach(function(name){ localStorage.setItem(KEY(name), JSON.stringify(data[name])); idx.push(name); });
+          idx=setIndex(idx);
+          refreshList(idx, idx[0]||'');
+          toast('Imported playlists (local)');
         }
-      }
-      header.addEventListener('click',()=>{ const now=localStorage.getItem(UIKEY_MAIN)==='1'?'0':'1'; localStorage.setItem(UIKEY_MAIN,now); syncMain(); });
-      requestAnimationFrame(syncMain);
-
-      // Auto-connect
-      if(loadConnPerChannel()){
-        updateStatusChips();
-        (async()=>{ try{ await drivePull(); refreshList(getIndex(),''); }catch{} startAutoPull(); })();
-      }
-    }catch(e){ console.error('[Glass] UI init failed:',e); toast('Glass UI failed: '+(e.message||e)); }
+      }catch(e){ toast('Import failed (bad JSON)'); }
+    };
+    fr.readAsText(file);
   }
 
-  // build UI
-  try{
-    if(document.readyState==='complete' || document.readyState==='interactive') injectUI();
-    else document.addEventListener('DOMContentLoaded', injectUI);
-  }catch(e){ console.error('[Glass] boot error',e); }
+  /* ------------------ GOOGLE DRIVE (Apps Script) DB ------------------ */
+  var DBSTATE={connected:false,baseUrl:'',dbId:'',token:'',cache:null};
+
+  function readRegistry(){ try{ return JSON.parse(localStorage.getItem(REGKEY)||'{}'); }catch(e){ return {}; } }
+  function writeRegistry(reg){ localStorage.setItem(REGKEY, JSON.stringify(reg||{})); }
+  function getRegEntry(base){ var reg=readRegistry(); return reg && reg[base] ? reg[base] : null; }
+  function setRegEntry(base, db, tok){ var reg=readRegistry(); reg[base]={ dbId:db, token:tok||'' }; writeRegistry(reg); }
+  function setLastUsed(base, db, tok){ localStorage.setItem(LAST_USED_KEY, JSON.stringify({baseUrl:base, dbId:db, token:tok||''})); }
+  function getLastUsed(){ try{ return JSON.parse(localStorage.getItem(LAST_USED_KEY)||''); }catch(e){ return null; } }
+
+  function saveConnPerChannel(){
+    localStorage.setItem('ct_db_conn:'+channelName, JSON.stringify({baseUrl:DBSTATE.baseUrl, dbId:DBSTATE.dbId, token:DBSTATE.token}));
+    setRegEntry(DBSTATE.baseUrl, DBSTATE.dbId, DBSTATE.token);
+    setLastUsed(DBSTATE.baseUrl, DBSTATE.dbId, DBSTATE.token);
+  }
+  function loadConnPerChannel(){
+    try{
+      var raw=localStorage.getItem('ct_db_conn:'+channelName);
+      if(!raw) return null;
+      var v=JSON.parse(raw);
+      return {baseUrl:v.baseUrl||'', dbId:v.dbId||'', token:v.token||''};
+    }catch(e){}
+    return null;
+  }
+
+  function driveInit(baseUrl){
+    return new Promise(function(resolve, reject){
+      (async function(){
+        try{
+          var initPost=baseUrl.replace(/\?.*$/, '')+'?init=1';
+          var r=await gmFetchJSON(initPost,{method:'POST'});
+          if(!r.json||r.json.error||!r.json.dbId){
+            r=await gmFetchJSON(initPost,{method:'GET'});
+            if(!r.json||!r.json.dbId){ toast('Create failed. Status '+r.status); throw new Error('init failed'); }
+          }
+          resolve(r.json.dbId);
+        }catch(e){ reject(e); }
+      })();
+    });
+  }
+
+  // --- FIX: Added retry mechanism for robustness on server delay ---
+  function drivePull(retries = 3, delay = 1000){
+    return new Promise(function(resolve, reject){
+      (async function attempt(r = retries, d = delay){
+        try{
+          var url=DBSTATE.baseUrl+'?db='+encodeURIComponent(DBSTATE.dbId);
+          var res=await gmFetchJSON(url,{method:'GET'});
+          if(!res.json||res.json.error){
+              throw new Error('Pull failed. Status '+res.status + (res.json ? ' Error: ' + res.json.error : ''));
+          }
+          DBSTATE.cache=res.json; if(!DBSTATE.cache.playlists) DBSTATE.cache.playlists={};
+          resolve(DBSTATE.cache);
+        }catch(e){
+            if (r > 0) {
+                console.warn(`drivePull failed (Retries left: ${r}). Retrying in ${d}ms.`, e);
+                await sleep(d);
+                return attempt(r - 1, d * 2);
+            }
+            reject(e);
+        }
+      })();
+    });
+  }
+
+  function drivePush(){
+    return new Promise(function(resolve, reject){
+      (async function(){
+        if(!DBSTATE.cache) return reject(new Error('nothing to push'));
+
+        var putUrl = DBSTATE.baseUrl+'?db='+encodeURIComponent(DBSTATE.dbId)+(DBSTATE.token?('&token='+encodeURIComponent(DBSTATE.token)):'');
+        var postUrl= DBSTATE.baseUrl+'?db='+encodeURIComponent(DBSTATE.dbId)+'&op=put'+(DBSTATE.token?('&token='+encodeURIComponent(DBSTATE.token)):'');
+        var body   = JSON.stringify(DBSTATE.cache);
+
+        async function tryPut(){ return gmFetchJSON(putUrl,{method:'PUT', headers:{'Content-Type':'application/json'}, data:body}); }
+        async function tryPost(){ return gmFetchJSON(postUrl,{method:'POST', headers:{'Content-Type':'application/json'}, data:body}); }
+        function ok(r){ return r && r.json && !r.json.error; }
+        function isMethodIssue(r){ return !r || r.status===405 || r.status===400 || r.status===0; }
+
+        var r = await tryPut().catch(function(e){ return { json:null, status:0, text:String(e&&e.message||'PUT error') }; });
+        if(!ok(r)){
+          if(r && r.json && r.json.error==='conflict' && r.json.server){
+            DBSTATE.cache=mergeServer_(DBSTATE.cache,r.json.server);
+            var r2=await tryPut().catch(function(e){ return { json:null, status:0, text:String(e&&e.message||'PUT retry error') }; });
+            if(ok(r2)){ await afterPushBcast(r2); return resolve(true); }
+          }
+          if(isMethodIssue(r) || (r && r.json && r.json.error)){
+            var p = await tryPost().catch(function(e){ return { json:null, status:0, text:String(e&&e.message||'POST error') }; });
+            if(!ok(p)){
+              if(p && p.json && p.json.error==='conflict' && p.json.server){
+                DBSTATE.cache=mergeServer_(DBSTATE.cache,p.json.server);
+                var p2=await tryPost().catch(function(e){ return { json:null, status:0, text:String(e&&e.message||'POST retry error') }; });
+                if(ok(p2)){ await afterPushBcast(p2); toast('Pushed via POST (fallback)'); return resolve(true); }
+                return reject(new Error('push after merge failed (POST)'));
+              }
+              // Improved error message
+              toast('Push failed ('+(p.status||r.status)+')'); return reject(new Error('push failed: POST fallback failure'));
+            }
+            await afterPushBcast(p); toast('Pushed via POST (fallback)');
+            return resolve(true);
+          }
+          // Improved error message
+          toast('Push failed ('+(r.status||'err')+')'); return reject(new Error('push failed: PUT failure'));
+        }
+
+        await afterPushBcast(r);
+        resolve(true);
+      })();
+    });
+  }
+
+  function afterPushBcast(resp){
+    return new Promise(function(resolve, reject){
+      (async function(){
+        try{
+          if(resp && resp.json && resp.json.rev && DBSTATE.cache){
+            DBSTATE.cache.sync = DBSTATE.cache.sync || {};
+            DBSTATE.cache.sync.rev = resp.json.rev;
+            DBSTATE.cache.sync.updatedAt = Date.now();
+          }
+          localStorage.setItem(REV_BROADCAST_KEY, String(Date.now()));
+
+          // --- CRITICAL FIX: Increased delay before attempting the pull to let the server state settle. ---
+          await sleep(3000); // Wait 3 seconds before the first pull attempt.
+
+          await drivePull(3, 1000); // Now drivePull runs with retries if the first attempt fails.
+
+          // Re-update the UI based on the new definitive state (this happens on successful pull inside drivePull)
+          // The caller's .then() block handles final UI updates based on the operation
+
+          resolve();
+        }catch(e){
+          console.error("Failed to re-sync after push:", e);
+          // Changed rejection to a more informative error for the caller
+          reject(new Error("Push success, but re-sync failed after 3 retries. Check DB connection/status."));
+        }
+      })();
+    });
+  }
+
+  function mergeServer_(local, server){
+    var out=JSON.parse(JSON.stringify(server));
+    out.playlists=out.playlists||{};
+    var L=local.playlists||{};
+    Object.keys(L).forEach(function(name){
+      var pl=L[name];
+      var s=out.playlists[name];
+      if(!s){
+        out.playlists[name]={ savedAt:(pl.savedAt||Date.now()), items:[].concat(pl.items||[]) };
+        return;
+      }
+      var seen=new Set((s.items||[]).map(urlToKey));
+      (pl.items||[]).forEach(function(u){
+        var k=urlToKey(u);
+        if(!seen.has(k)){ s.items.push(u); seen.add(k); }
+      });
+      s.savedAt=Math.max(s.savedAt||0, pl.savedAt||0);
+    });
+    return out;
+  }
+
+  function usingRemote(){ return DBSTATE.connected && DBSTATE.cache; }
+
+  var _readSaved=readSaved, _writeSaved=writeSaved, _getIndex=getIndex, _setIndex=setIndex;
+  readSaved=function(name){ if(!usingRemote()) return _readSaved(name); var p=(DBSTATE.cache.playlists||{})[name]; return p?{savedAt:(p.savedAt||0), items:(p.items||[])}:{savedAt:0,items:[]}; };
+  writeSaved=function(name,payload){ if(!usingRemote()) return _writeSaved(name,payload); DBSTATE.cache.playlists=DBSTATE.cache.playlists||{}; DBSTATE.cache.playlists[name]={ savedAt:(payload.savedAt||Date.now()), items:(payload.items||[]) }; };
+  getIndex=function(){ return usingRemote()? Object.keys(DBSTATE.cache.playlists).sort(function(a,b){return a.localeCompare(b);}): _getIndex(); };
+  setIndex=function(arr){ if(!usingRemote()) return _setIndex(arr); var want=new Set(arr); var all=DBSTATE.cache.playlists||{}; Object.keys(all).forEach(function(k){ if(!want.has(k)) delete all[k]; }); return Array.from(want).sort(function(a,b){return a.localeCompare(b);}); };
+
+  /* ---------------------- GLASS UI (embedded) ---------------------- */
+  var selectEl, modeEl, whereAllEl, whereEl, countEl, nameInput, addUrlInput;
+
+  function injectGlassCSS(){
+    if($('#ct-savedpl-style')) return;
+    var css='';
+    css+='#ct-savedpl-panel{position:static !important;width:100% !important;max-width:none !important;margin:8px 0 10px !important;background:rgba(24,24,28,.65);color:#e9ecf1;border:1px solid rgba(255,255,255,.16);border-radius:14px;box-shadow:0 12px 40px rgba(0,0,0,.28);backdrop-filter:blur(16px) saturate(160%);-webkit-backdrop-filter:blur(16px) saturate(160%);overflow:hidden;}';
+    css+='#ct-savedpl-header{display:flex;align-items:center;gap:10px;padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.18);}';
+    css+='#ct-savedpl-title{font-weight:700;letter-spacing:.2px;}';
+    css+='#ct-savedpl-status{margin-left:auto;}';
+    css+='.ct-chip{padding:4px 8px;border-radius:12px;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.14);font-weight:600;}';
+    css+='.ct-hstack{display:flex;align-items:center;gap:8px;}';
+    css+='.ct-caret{appearance:none;border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.08);color:#e9ecf1;user-select:none;font-size:14px;opacity:.9;display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;padding:0;border-radius:8px;cursor:pointer;}';
+    css+='.ct-caret svg{width:14px;height:14px;transition:transform .2s ease;}';
+    css+='.ct-caret[aria-expanded="false"] svg{transform:rotate(-90deg);}';
+    css+='#ct-savedpl-body{transition:max-height .25s ease,opacity .2s ease,padding .2s ease;padding:8px 12px 10px;}';
+    css+='#ct-savedpl-panel.ct-collapsed #ct-savedpl-body{max-height:0;opacity:0;padding-top:0;padding-bottom:0;overflow:hidden;}';
+    css+='.ct-row{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:6px 0;}';
+    css+='.ct-sep{height:1px;background:linear-gradient(90deg,transparent,rgba(255,255,255,.18),transparent);margin:6px 0;}';
+    css+='.ct-btn{padding:6px 10px;cursor:pointer;border-radius:12px;border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.08);color:#e9ecf1;}';
+    css+='.ct-btn:hover{background:rgba(255,255,255,.10);}';
+    css+='.ct-input,.ct-select{padding:6px 8px;border-radius:10px;min-height:28px;min-width:180px;border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.06);color:#e9ecf1;}';
+    css+='.ct-muted{color:#bac2cf;}';
+    var style=document.createElement('style'); style.id='ct-savedpl-style'; document.head.appendChild(style); style.textContent=css;
+  }
+
+  function button(label, fn, extraClass){ var b=document.createElement('button'); b.textContent=label; b.className='ct-btn '+(extraClass||''); b.addEventListener('click', fn); return b; }
+  var namesDatalist=document.createElement('datalist'); namesDatalist.id='ct-savedpl-names'; document.body.appendChild(namesDatalist);
+
+  function refreshList(names, selectName){
+    if(!selectEl) return;
+    var currentVal = selectEl.value;
+    selectEl.innerHTML='';
+    var ph=document.createElement('option'); ph.value=''; ph.textContent='(choose a playlist)'; selectEl.appendChild(ph);
+    names.forEach(function(n){ var o=document.createElement('option'); o.value=n; o.textContent=n; selectEl.appendChild(o); });
+
+    // Try to re-select what was selected
+    if (selectName && names.includes(selectName)) selectEl.value = selectName;
+    else if (currentVal && names.includes(currentVal)) selectEl.value = currentVal;
+
+    namesDatalist.innerHTML='';
+    names.forEach(function(n){ var o=document.createElement('option'); o.value=n; namesDatalist.appendChild(o); });
+  }
+
+  /* -------- Helper: unify all “connected” UI updates in one call -------- */
+  function updateConnectedUI(statusEl, statusChipEl, urlInput, dbInput, tokInput){
+    try{
+      statusEl.textContent = 'Connected ('+DBSTATE.dbId.slice(0,6)+'…)';
+      if (statusChipEl) statusChipEl.textContent = 'Remote';
+      if (urlInput) urlInput.value = DBSTATE.baseUrl || '';
+      if (dbInput)  dbInput.value  = DBSTATE.dbId   || '';
+      if (tokInput) tokInput.value = DBSTATE.token  || '';
+      refreshList(getIndex(), '');
+    }catch(e){}
+  }
+
+  function attachDatabaseUI(container, headerStatusEl){
+    var dbWrap=document.createElement('div'); dbWrap.id='ct-db-wrap';
+    var head=document.createElement('div'); head.id='ct-db-head';
+    var caret=document.createElement('button'); caret.className='ct-caret'; caret.title='Collapse/Expand'; caret.textContent='\u25BE';
+    var title=document.createElement('span'); title.className='ct-muted'; title.textContent='Database';
+    var statusChip=document.createElement('span'); statusChip.id='ct-db-status'; statusChip.className='ct-chip';
+    head.appendChild(caret); head.appendChild(title); head.appendChild(statusChip);
+
+    var section=document.createElement('div'); section.style.transition='max-height .25s ease, opacity .2s ease'; section.style.overflow='hidden';
+    var body=document.createElement('div'); body.style.padding='6px 12px 12px'; body.appendChild(section);
+
+    // Connect drawer
+    var drawer=document.createElement('div');
+    drawer.id='ct-connect-drawer';
+    drawer.style.cssText='display:flex;flex-wrap:wrap;gap:8px;align-items:center;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.12);padding:8px;border-radius:10px;margin-bottom:8px;';
+    var urlInput=document.createElement('input'); urlInput.placeholder='Apps Script URL (…/exec)'; urlInput.className='ct-input'; urlInput.style.minWidth='260px';
+    var dbInput =document.createElement('input'); dbInput.placeholder='dbId (from cytube_library_*.json)'; dbInput.className='ct-input'; dbInput.style.minWidth='200px';
+    var tokInput=document.createElement('input'); tokInput.placeholder='Write Token (optional)'; tokInput.className='ct-input'; tokInput.style.minWidth='160px';
+
+    var connectBtn=button('Connect', function(){
+      if(!urlInput.value||!dbInput.value){ toast('Need URL and dbId'); return; }
+      DBSTATE.baseUrl=String(urlInput.value).trim(); DBSTATE.dbId=String(dbInput.value).trim(); DBSTATE.token=String(tokInput.value||'').trim(); DBSTATE.connected=true;
+      drivePull().then(function(){
+        saveConnPerChannel();
+        updateConnectedUI(headerStatusEl, statusChip, urlInput, dbInput, tokInput);
+        toast('Connected.');
+      }).catch(function(e){
+        console.error(e); toast('Connect failed'); DBSTATE.connected=false;
+      });
+    });
+
+    var createBtn=button('Create DB', function(){
+      var base=String(urlInput.value||'').trim(); if(!base){ toast('Enter /exec URL'); return; }
+      driveInit(base).then(function(newDb){
+        DBSTATE.baseUrl=base; DBSTATE.dbId=newDb; DBSTATE.token=String(tokInput.value||'').trim();
+        DBSTATE.connected=true; DBSTATE.cache={version:1, playlists:{}, sync:{rev:0,updatedAt:Date.now()}};
+        saveConnPerChannel();
+        updateConnectedUI(headerStatusEl, statusChip, urlInput, dbInput, tokInput);
+        dbInput.value=newDb;
+        toast('DB created & connected');
+      }).catch(function(e){ console.error(e); toast('Create failed'); });
+    });
+
+    var pullBtn=button('Pull', function(){
+      if(!DBSTATE.connected){ toast('Not connected'); return; }
+      drivePull().then(function(){ refreshList(getIndex(),''); toast('Pulled latest.'); }).catch(function(){ toast('Pull failed'); });
+    });
+    var pushBtn=button('Push', function(){
+      if(!DBSTATE.connected){ toast('Not connected'); return; }
+      drivePush().then(function(){ toast('Pushed.'); }).catch(function(e){ toast(String(e && e.message || e)); });
+    });
+
+    drawer.appendChild(urlInput); drawer.appendChild(dbInput); drawer.appendChild(tokInput);
+    drawer.appendChild(connectBtn); drawer.appendChild(createBtn); drawer.appendChild(pullBtn); drawer.appendChild(pushBtn);
+
+    section.appendChild(drawer);
+    dbWrap.appendChild(head); dbWrap.appendChild(body);
+
+    function refreshStatusUI(){ if(DBSTATE.connected){ headerStatusEl.textContent='Connected ('+DBSTATE.dbId.slice(0,6)+'…)'; statusChip.textContent='Remote'; } else { headerStatusEl.textContent='Local (offline)'; statusChip.textContent='Local'; } }
+    function syncDbCollapsedUI(){ var collapsed=localStorage.getItem(UIKEY_DB)==='1'; section.style.maxHeight=collapsed?'0px':''; section.style.opacity=collapsed?'0':'1'; dbWrap.classList.toggle('ct-collapsed', collapsed); caret.textContent=collapsed?'\u25B8':'\u25BE'; }
+
+    head.addEventListener('click', function(){ var now=localStorage.getItem(UIKEY_DB)==='1'?'0':'1'; localStorage.setItem(UIKEY_DB, now); syncDbCollapsedUI(); });
+
+    container.appendChild(dbWrap);
+    refreshStatusUI(); syncDbCollapsedUI();
+
+    // Autofill inputs if we have a stored connection (for visibility)
+    try{
+      var per = loadConnPerChannel();
+      var last = getLastUsed();
+      if(per){ if(per.baseUrl) urlInput.value=per.baseUrl; if(per.dbId) dbInput.value=per.dbId; if(per.token) tokInput.value=per.token; }
+      else if(last){ if(last.baseUrl) urlInput.value=last.baseUrl; if(last.dbId) dbInput.value=last.dbId; if(last.token) tokInput.value=last.token; }
+    }catch(e){}
+  }
+
+  function makeUI(){
+    if($('#ct-savedpl-panel')) return;
+    injectGlassCSS();
+
+    var panel=document.createElement('div'); panel.id='ct-savedpl-panel';
+    var header=document.createElement('div'); header.id='ct-savedpl-header';
+    var caret=document.createElement('button'); caret.className='ct-caret'; caret.title='Collapse/Expand'; caret.setAttribute('aria-expanded','true');
+    caret.innerHTML='<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6z" fill="currentColor"/></svg>';
+    var title=document.createElement('div'); title.id='ct-savedpl-title'; title.textContent='Saved Playlists';
+    var chan=document.createElement('span'); chan.className='ct-chip'; chan.textContent=channelName;
+    var status=document.createElement('div'); status.id='ct-savedpl-status'; status.className='ct-chip'; status.textContent='Local (offline)';
+    var stack=document.createElement('div'); stack.className='ct-hstack'; stack.appendChild(caret); stack.appendChild(title);
+    header.appendChild(stack); header.appendChild(chan); header.appendChild(status);
+    panel.appendChild(header);
+
+    var body=document.createElement('div'); body.id='ct-savedpl-body'; panel.appendChild(body);
+
+    var r1=document.createElement('div'); r1.className='ct-row';
+    var r2=document.createElement('div'); r2.className='ct-row';
+    var r3=document.createElement('div'); r3.className='ct-row';
+    var r4=document.createElement('div'); r4.className='ct-row';
+    var r5=document.createElement('div'); r5.className='ct-row';
+
+    selectEl=document.createElement('select'); selectEl.className='ct-select'; selectEl.style.minWidth='180px';
+    modeEl=document.createElement('select'); modeEl.className='ct-select'; modeEl.innerHTML='<option value="replace">Replace</option><option value="append">Append</option>';
+
+    // Where selector for Load (All)
+    whereAllEl=document.createElement('select'); whereAllEl.className='ct-select';
+    whereAllEl.innerHTML='<option value="next">Next</option><option value="end" selected>End</option>';
+
+    var loadBtn=button('Load (All)', function(){ loadWhole(selectEl.value, modeEl.value, whereAllEl.value); });
+    var delBtn=button('Delete', function(){ deleteName(selectEl.value); });
+    r1.appendChild(selectEl); r1.appendChild(modeEl); r1.appendChild(whereAllEl); r1.appendChild(loadBtn); r1.appendChild(delBtn);
+
+    whereEl=document.createElement('select'); whereEl.className='ct-select'; whereEl.innerHTML='<option value="next">Next</option><option value="end">End</option>';
+    countEl=document.createElement('input'); countEl.type='number'; countEl.min='1'; countEl.value='5'; countEl.className='ct-input'; countEl.style.width='72px';
+    var randomWrap=document.createElement('label'); randomWrap.className='ct-chip'; randomWrap.style.cursor='pointer';
+    var randomCb=document.createElement('input'); randomCb.type='checkbox'; randomCb.checked=true; randomCb.style.marginRight='6px';
+    randomWrap.appendChild(randomCb); randomWrap.appendChild(document.createTextNode('Random'));
+    var addNBtn=button('Add N', function(){ var n=parseInt(countEl.value||'5',10); var where=whereEl.value; addNFromSaved(selectEl.value,n,where,randomCb.checked); });
+    r2.appendChild(whereEl); r2.appendChild(countEl); r2.appendChild(randomWrap); r2.appendChild(addNBtn);
+
+    nameInput=document.createElement('input'); nameInput.placeholder='New playlist name'; nameInput.setAttribute('list','ct-savedpl-names'); nameInput.className='ct-input'; nameInput.style.minWidth='180px';
+    var saveBtn=button('Save As', function(){ saveAs(nameInput.value.trim()); });
+    var newEmptyBtn=button('New Empty', function(){ createNewEmptyPlaylist(nameInput.value.trim(), true); });
+    r3.appendChild(nameInput); r3.appendChild(saveBtn); r3.appendChild(newEmptyBtn);
+
+    addUrlInput=document.createElement('input'); addUrlInput.placeholder='URL to add to saved'; addUrlInput.className='ct-input'; addUrlInput.style.minWidth='260px';
+    var addUrlBtn=button('Add URL', function(){ appendUrlToSaved(selectEl.value, addUrlInput.value); });
+    var addCurrentBtn=button('Add Current', function(){ appendCurrentQueueToSaved(selectEl.value); });
+    var editBtn=button('Open Editor', function(){ openEditor(selectEl.value); });
+    r4.appendChild(addUrlInput); r4.appendChild(addUrlBtn); r4.appendChild(addCurrentBtn); r4.appendChild(editBtn);
+
+    function exportAll(){
+      var allData = {};
+      var allNames = getIndex();
+      allNames.forEach(function(name){
+        allData[name] = readSaved(name);
+      });
+      var blob = new Blob([JSON.stringify({version:1, data:allData}, null, 2)], {type:'application/json'});
+      var a = document.createElement('a');
+      a.download = 'cytube_saved_playlists_'+channelName+'_'+Date.now()+'.json';
+      a.href = URL.createObjectURL(blob);
+      a.click();
+      URL.revokeObjectURL(a.href);
+      toast('Exported '+allNames.length+' playlists.');
+    }
+
+    var exportBtn=button('Export', exportAll);
+    var importInput=document.createElement('input'); importInput.type='file'; importInput.accept='.json'; importInput.style.display='none';
+    importInput.addEventListener('change', function(e){ var f=(e.target && e.target.files && e.target.files[0]) ? e.target.files[0] : null; if(f) importAll(f); e.target.value=''; });
+    var importBtn=button('Import', function(){ importInput.click(); });
+    r5.appendChild(exportBtn); r5.appendChild(importBtn); r5.appendChild(importInput);
+
+    function divSep(){ var d=document.createElement('div'); d.className='ct-sep'; return d; }
+    body.appendChild(r1); body.appendChild(divSep()); body.appendChild(r2); body.appendChild(divSep()); body.appendChild(r3); body.appendChild(divSep()); body.appendChild(r4); body.appendChild(divSep()); body.appendChild(r5); body.appendChild(divSep());
+
+    attachDatabaseUI(body, status);
+
+    function findPM(){ return document.querySelector('#playlistmanager') || document.querySelector('#rightpane #playlistmanager') || document.querySelector('#rightpane .well:last-of-type'); }
+    function ensureMounted(node){ var pm=findPM(); if(!pm) return false; if(node.nextElementSibling!==pm){ pm.parentElement.insertBefore(node, pm); } return true; }
+    if(!ensureMounted(panel)) setTimeout(function(){ ensureMounted(panel); }, 300);
+    var host=document.querySelector('#rightpane') || document.body; new MutationObserver(function(){ ensureMounted(panel); }).observe(host,{childList:true,subtree:true});
+
+    refreshList(getIndex(), '');
+
+    function syncMainCollapsedUI(){
+      var collapsed = localStorage.getItem(UIKEY_MAIN)==='1';
+      caret.setAttribute('aria-expanded', String(!collapsed));
+      panel.classList.toggle('ct-collapsed', collapsed);
+      body.style.maxHeight=collapsed?'0px':''; body.style.opacity=collapsed?'0':'1';
+    }
+    caret.addEventListener('click', function(){ var now = localStorage.getItem(UIKEY_MAIN)==='1' ? '0' : '1'; localStorage.setItem(UIKEY_MAIN, now); syncMainCollapsedUI(); });
+    syncMainCollapsedUI();
+
+    /* ------------------ AUTO-CONNECT (fixed) ------------------ */
+    (function autoConnect(){
+
+      // references inside DB drawer
+      var dbWrap = document.querySelector('#ct-db-wrap');
+      var statusChipEl = dbWrap ? dbWrap.querySelector('#ct-db-status') : null;
+      var urlInput = dbWrap ? dbWrap.querySelector('input[placeholder^="Apps Script URL"]') : null;
+      var dbInput  = dbWrap ? dbWrap.querySelector('input[placeholder^="dbId"]') : null;
+      var tokInput = dbWrap ? dbWrap.querySelector('input[placeholder^="Write Token"]') : null;
+
+      function tryConnectFrom(rec, label){
+        return new Promise(function(resolve, reject){
+          (async function(){ // Internal async block
+            if (!rec || !rec.baseUrl || !rec.dbId) return resolve(false);
+            DBSTATE.baseUrl=rec.baseUrl; DBSTATE.dbId=rec.dbId; DBSTATE.token=rec.token||''; DBSTATE.connected=true;
+            try{
+              // Using the now-retrying drivePull
+              await drivePull();
+
+              if(!DBSTATE.cache || !DBSTATE.cache.playlists) throw new Error('no cache');
+              saveConnPerChannel();
+              updateConnectedUI(status, statusChipEl, urlInput, dbInput, tokInput);
+              toast('DB auto-connected ('+label+').');
+              resolve(true);
+            }catch(e){
+              console.error('autoConnect tryConnectFrom failed:', e);
+              DBSTATE.connected=false;
+              resolve(false);
+            }
+          })();
+        });
+      }
+
+      // The execution chain
+      tryConnectFrom(loadConnPerChannel(), 'channel')
+        .then(function(connected){
+          if(connected) return;
+          return tryConnectFrom(getLastUsed(), 'last used');
+        })
+        .then(function(connected){
+          if(connected) return;
+          var regAll = (function(){ try{ return JSON.parse(localStorage.getItem('ct_db_registry')||'{}'); }catch(e){ return {}; } })();
+          var bases = Object.keys(regAll||{});
+          if (bases.length===1){
+            var base=bases[0], rec=regAll[base];
+            return tryConnectFrom({ baseUrl: base, dbId: rec && rec.dbId, token: rec && rec.token }, 'registry');
+          }
+        })
+        .catch(function(e){
+          DBSTATE.connected=false;
+          toast('Auto-connect failed; use Connect.');
+        });
+    })();
+    /* ---------------------------------------------------------- */
+
+    try{
+      window.addEventListener('storage', function(e){ if(e && e.key===REV_BROADCAST_KEY){ /* optionally: auto-pull */ } });
+    }catch(e){}
+  }
+
+  function maybeBroadcast(){ try{ localStorage.setItem(REV_BROADCAST_KEY, String(Date.now())); }catch(e){} }
+
+  if(document.readyState==='complete' || document.readyState==='interactive') makeUI();
+  else document.addEventListener('DOMContentLoaded', makeUI);
+
 })();
