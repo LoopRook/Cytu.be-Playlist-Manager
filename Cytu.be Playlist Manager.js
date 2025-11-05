@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         CyTu.be Playlist Manager
 // @namespace    cytube-saved-playlists
-// @version      3.7.8-mod-toast-reduction
+// @version      3.7.10
 // @description  Drive-backed playlists per channel. Save/Load, Replace/Append (Next/End), Add-N, Random, Dedupe, Import/Export, Text Editor
 // @match        https://cytu.be/*
 // @match        https://*.cytu.be/*
