@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Cy.Tube Playlist Manager
+// @name         CyTube Saved Playlists + Drive DB (Glass Embedded, no popups)
 // @namespace    cytube-saved-playlists
-// @version      3.7.8-mod-toast-reduction
-// @description  Drive-backed playlists per channel. Save/Load, Replace/Append (Next/End), Add-N, Random, Dedupe, Import/Export, Text Editor. 
+// @version      3.7.9
+// @description  Drive-backed playlists per channel. Embedded above #playlistmanager (no floating UI, no prompts). Save/Load, Replace/Append (Next/End), Add-N, Random, Dedupe, Import/Export, Text Editor. Apps Script DB with create/connect/pull/push & conflict-merge. Push auto-falls back to POST &op=put if PUT isn't supported. Reliable auto-reconnect.
 // @match        https://cytu.be/*
 // @match        https://*.cytu.be/*
 // @run-at       document-end
@@ -158,7 +158,7 @@
       }).catch(function(e){
         // If drivePush failed, it's either the push itself or the post-push pull/resync (the common case)
         console.warn('Push failed after saveAs. Attempting final pull...', e);
-        // NOTE: Removing the first "Push failed" toast. The final result (success/failure) is what matters.
+        // NOTE: Removing the first "Push failed" toast.
 
         drivePull(1, 1500).then(function(){ // Final check (single attempt)
             refreshList(localIdx, name);
@@ -891,6 +891,20 @@
           toast('Auto-connect failed; use Connect.');
         });
     })();
+    /* ---------------------------------------------------------- */
+
+    /* ------------------ Periodic Refresh ------------------ */
+    setInterval(function(){
+      if(DBSTATE.connected){
+        // drivePull updates DBSTATE.cache on success. We then update the UI list.
+        drivePull().then(function(){
+          refreshList(getIndex(), selectEl.value);
+        }).catch(function(e){
+          // Avoid spamming user with toast, just log the error
+          console.error("Periodic pull failed:", e);
+        });
+      }
+    }, 25000); // 25 seconds
     /* ---------------------------------------------------------- */
 
     try{
