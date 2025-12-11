@@ -43,24 +43,7 @@
   function readSaved(name){ try{ return JSON.parse(localStorage.getItem(KEY(name))||'{}'); }catch(e){ return {}; } }
   function writeSaved(name,payload){ localStorage.setItem(KEY(name), JSON.stringify(payload)); }
 
-  /* ----------------------- GM fetch (with fallback) ---------------------- */
-  function gmFetch(url, opts){
-    opts=opts||{}; var method=opts.method||'GET'; var headers=opts.headers||{}; var data=opts.data||null; var responseType=opts.responseType||'text';
-    return new Promise(function(resolve, reject){
-      if (typeof GM_xmlhttpRequest !== 'function'){
-        fetch(url, { method: method, headers: headers, body: data })
-          .then(function(r){ return r.text().then(function(text){ resolve({status:r.status, responseText:text}); }); })
-          .catch(reject);
-        return;
-      }
-      GM_xmlhttpRequest({ url:url, method:method, headers:headers, data:data, responseType:responseType,
-        onload:resolve, onerror:reject, ontimeout:function(){ reject(new Error('GM timeout')); } });
-    });
-  }
-  function gmFetchJSON(url, opts){
-    return gmFetch(url, Object.assign({}, opts||{}, {responseType:'text'}))
-      .then(function(r){ var text=r.responseText||''; var json=null; try{ json=JSON.parse(text); }catch(e){} return { json: json, status: r.status, text: text }; });
-  }
+  ea217bde-11f0-4209-8f99-fa2ebc9cc66d
 
   /* ----------------------- URL + dedupe helpers ---------------------- */
   function parseYouTubeId(u){
